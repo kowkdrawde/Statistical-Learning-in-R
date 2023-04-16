@@ -1,0 +1,274 @@
+---
+title: "**An Evaluation of Linear Discriminant Analysis (LDA) using R**"
+fontsize: 12pt
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=F, message=F, eval=T, warning=F)
+```
+
+In this post, I am going discuss the performance of the LDA classifier when some underlying assumptions do not hold.  Three misspecification scenarios (i) the underlying distribution has a heavier tail than normal; (ii) imbalanced sampling of training set; and (iii) class flip in training set, are examined using simulated datasets.
+
+**Brief recap of LDA**  
+
+Consider a classification problem to find the *posterior* probability that an observation of $p$ variables $X = (x_1, ..., x_p)$ belongs to a class $Y = k$ denoted by $\Pr(Y=k|X=x)$. The posterior probability is often estimated through the application the Bayes' theorem:
+$$ \Pr(Y=k|X=x) = \frac{\Pr(X=x|Y=k)\pi_k}{\sum_{l=1}^K \Pr(X=x|Y=l)\pi_l} \approx \frac{ q_k(x) \pi_k}{\sum_{l=1}^K q_l(x)\pi_l} $$
+
+where $\pi_k = \Pr(Y=k)$ is the empirical probability estimated from the proportion of class $k$ out of $K$ classes in the sample. And $q_k$ the density function of $X$ of class $k$.  The LDA approximates $q_k(x)$ with the assumptions: 1. $q_k(x)$ is a multivariate normal $N(\mu_k, \Sigma)$; 2. the mean vectors $\mu_k$ can be different among $k$ but the $K$ classes share a common covariance matrix $\Sigma$. To put these mathematically:
+$$ q_k(x) = \frac{1}{(2\pi|\Sigma|)^{\frac{p}{2}}}\exp\left(-\frac{1}{2}\left(x-\mu_k\right)^t \Sigma^{-1}\left(x-\mu_k\right) \right) $$
+
+With some algebra it can be shown that the classification of an observation $X$ belongs to class $k$ is where the *linear discriminant function* $\delta_k(x)$ is the largest:
+$$ \delta_k(x) = x^t \Sigma^{-1}\mu_k - \frac{1}{2}\mu_k^t \Sigma^{-1}\mu_k + \log \pi_k $$
+The mean vectors $\mu_k$ can be estimated from the sample mean $x$ of class $k$ and $\Sigma$ from all classes.  The decision boundary lies where $\delta_k(x) = \delta_l(x)$, which is linear in $x$.
+```{r library}
+library(ggplot2)
+library(MASS)
+library(tidyverse)
+library(cowplot)
+```
+
+**Baseline model**  
+
+Let's consider the simple case of only two classes $Y \epsilon \{1,0\}$ with two predictors $X1, X2$. I have made use of the *tidyverse*, *MASS* and *ggplot2* libraries of R. The baseline case is generated where $X1, X2$ come from a multivariate Gaussian distribution of same $\Sigma$ while the mean vectors depend on the value of $Y$.  A plot is shown below to illustrate a sample generated and the decision boundary predicted by LDA.
+```{r, echo=TRUE}
+Z <- matrix(rnorm(2*200), ncol = 2) # bivariate Gaussian
+y <- rep(c(1, 0), times = c(200, 200)) # class balance
+X1 <- 3*Z[,1] + 2*Z[,2] + 6*y # predictors shares common Sigma
+X2 <- Z[,1] - 4*Z[,2] + 4*y   # but mean vectors depends on y
+```
+
+```{r boundary}
+dat = data.frame(X1 = X1, X2 = X2, class = as.factor(y))
+g <- ggplot( data = dat, mapping = aes(x = X1, y=X2, colour=class)) + 
+  geom_point()
+
+lda_bdry <- function(g, dat) {
+  
+  # predict class
+  lda_fit <- lda(class ~ X1 + X2, data=dat)
+  X1 <- dat$X1
+  X2 <- dat$X2
+  
+  # make contour
+  x_grid <- seq(floor(min(X1)),ceiling(max(X1)),length.out=500)
+  y_grid <- seq(floor(min(X2)),ceiling(max(X2)),length.out=500)
+
+  df <- expand.grid(X1=x_grid, X2=y_grid)
+  df['pred'] <- predict(lda_fit, newdata=df)$class
+  df[,'pred'] <- as.numeric(df[,'pred'])-1
+  
+  # plot and return lda_fit
+  h <- g + geom_contour(data=df, aes(x=X1, y=X2, z=pred), colour='blue', alpha=0.5, linewidth=0.3)
+  print(h)
+  return(lda_fit)
+}
+
+lda_bdry(g, dat)
+```
+
+**Common parameters, Train-test Split, and Misclassification rate** 
+
+Each sample has 2000 observations in each of the classes 1 and 0.  For each of the misspecification cases below, there will be a sequence of parameters $m$ to simulate different levels of severity of the misspecification.  An LDA model is trained using 70% of the data and tested using the remaining 30%.  For each $m$, the mean error is obtained by averaging 100 train/test samples.  The error refers to the number of misclassifications (predicted 1 as 0 and vice versa) divided by the total number of observations in a sample.  Each misspecification case will be compared with the baseline error of LDA on $20\times100$ iterations.  The baseline error is about 12.3%.
+```{r common param}
+# common parameters
+iter_size <- 100
+n_true <- 1000
+n_false <- 1000
+n <- n_true + n_false
+```
+
+```{r baseline}
+# Baseline
+mean_base <- data.frame(matrix(ncol=2, nrow=0))
+
+for (m in seq(1,20)) { # 20 parameters
+  error <- c()
+  
+  # iterations for 1 parameter
+  for (i in seq(iter_size)) { 
+    
+    Z <- matrix(rnorm(2*n), ncol = 2) # two-variate Gaussian
+    y <- rep(c(1, 0), times = c(n_true, n_false)) # class balance
+    X1 <- 3*Z[,1] + 2*Z[,2] + 6*y # predictors shares common Sigma
+    X2 <- Z[,1] - 4*Z[,2] + 4*y   # but mean vectors depends on y
+    dat = data.frame(X1 = X1, X2 = X2, class = as.factor(y))
+    
+    # stratified train test split
+    dat <- dat %>% mutate(id=row_number())
+    train <- dat %>% group_by(class) %>% sample_frac(0.7)
+    test <- anti_join(dat, train, by='id')
+
+    # LDA
+    l <- lda(class ~ X1 + X2, data=train)
+    pred.class <- predict(l, newdata=test[,1:2])$class
+    true.class <- test$class
+    t <- table(pred.class, true.class)
+    error <- append(error, 1-sum( diag(t) ) / sum(t) )
+  }
+  
+  mean_base <- rbind(mean_base, c(m, mean(error)))
+}
+mean_base <- mean(mean_base[,2])
+mean_base
+
+```
+
+**Misspecification (i) - Heavy Tail**  
+
+Support the underlying distribution is t-distribution and not the normal distribution and $m$ represents the parameter of the degrees of freedom (dof) from 2 to 40 for the t-distribution.  The tail is heavier when $m$ is smaller.
+
+```{r mean_rt, cahce=T}
+# Misspecification (i) Heavy tail
+mean_rt <- data.frame(matrix(ncol=2, nrow=0))
+
+for (m in seq(1,20)) { # 20 parameters
+  error <- c()
+  
+  # iterations for 1 parameter
+  for (i in seq(iter_size)) { 
+    
+    Z <- matrix(rt(2*n, df=2*m), ncol=2) # t-distribution with even numbers of dof
+    y <- rep(c(1, 0), times = c(n_true, n_false)) # class balance
+    X1 <- 3*Z[,1] + 2*Z[,2] + 6*y # predictors shares common Sigma
+    X2 <- Z[,1] - 4*Z[,2] + 4*y   # but mean vectors depends on y
+    dat = data.frame(X1 = X1, X2 = X2, class = as.factor(y))
+    
+    # stratified train test split
+    dat <- dat %>% mutate(id=row_number())
+    train <- dat %>% group_by(class) %>% sample_frac(0.7)
+    test <- anti_join(dat, train, by='id')
+    
+    # LDA
+    l <- lda(class ~ X1 + X2, data=train)
+    pred.class <- predict(l, newdata=test[,1:2])$class
+    true.class <- test$class
+    t <- table(pred.class, true.class)
+    error <- append(error, 1-sum( diag(t) ) / sum(t) )
+  }
+  
+  mean_rt <- rbind(mean_rt, c(2*m, mean(error)))
+}
+
+nm <- c('dof','error_rate')
+colnames(mean_rt) <- nm
+f_rt <- ggplot(data=mean_rt, mapping=aes(x=dof, y=error_rate)) +
+  geom_point() + geom_smooth(se = FALSE, colour='darkgreen', linewidth=0.5) +
+  geom_abline(intercept=mean_base, slope=0, lty='dashed') +
+  xlab('Degree of Freedom of t-distribution') + ylab('error rate')
+f_rt
+```
+The first misspecification - heavy tail shows that the error rate rises with a heavier tail.  The t-distribution approximates the normal distribution (normal-weight tail) fairly in large dof (say $>30$), which is our baseline case.  The plot reflects this point as the error rate asymptotically approaches the baseline error of 12.3%.  The error rate goes up when $dof < 10$.  It suggests that LDA is not robust against heavy tailed distributions which deviates from the Gaussian assumption.  Another perspective is that it is easier to have observations at extreme values in a heavy tail.  The LDA decision boundary will be highly leveraged on these tailed observations and predictions are affected. 
+
+**Misspecification (ii) - Imbalanced Sampling in Training Set**  
+
+Suppose the training set is drawn from imbalanced composition of classes 1 and 0.  Half to all sample from classes 1 and 0 are drawn from the training set.  The proportion of classes 1 to 0 ranged from 99%-1%, 97%-3%, 96%-4% ... and so on to 1%-99%.
+
+```{r mean_ib, cache=T}
+# Misspecification (ii) imbalance sampling
+mean_ib <- data.frame(matrix(ncol=2, nrow=0))
+  
+for (m in seq(1,99)) { # 99 parameters, each represents an increment of 1%
+  error <- c()
+  
+  # iterations for 1 parameter
+  for (i in seq(iter_size)) { 
+    
+    Z <- matrix(rnorm(2*n), ncol = 2) # two-variate Gaussian
+    y <- rep(c(1, 0), times = c(n_true, n_false)) # class balance
+    X1 <- 3*Z[,1] + 2*Z[,2] + 6*y # predictors shares common Sigma
+    X2 <- Z[,1] - 4*Z[,2] + 4*y   # but mean vectors depends on y
+    dat = data.frame(X1 = X1, X2 = X2, class = as.factor(y))
+    
+    # stratified train test split
+    dat <- dat %>% mutate(id=row_number())
+    train <- dat %>% group_by(class) %>% sample_frac(0.7)
+    test <- anti_join(dat, train, by='id')
+
+    # mis (ii) imbalanced sampling
+    train1 <- train[train$class=='1',]
+    train0 <- train[train$class=='0',]
+
+    # 1-0 ratio from 0.05-0.95 to 0.95-0.05
+    train <- rbind(sample_frac(train1, 1-0.01*m), sample_frac(train0, 0.01*m))
+  
+    s <- summary(train$class)
+    ratio <- s['1']/sum(s)
+
+    # LDA
+    l <- lda(class ~ X1 + X2, data=train)
+    pred.class <- predict(l, newdata=test[,1:2])$class
+    true.class <- test$class
+    t <- table(pred.class, true.class)
+    error <- append(error, 1-sum( diag(t) ) / sum(t) )
+  }
+  
+  mean_ib <- rbind(mean_ib, c(ratio, mean(error)))
+}
+
+nm <- c('one_prop','error_rate')
+colnames(mean_ib) <- nm
+f_ib <- ggplot(data=mean_ib, mapping=aes(x=one_prop, y=error_rate)) + 
+  geom_point() + geom_abline(intercept=mean_base, slope=0, lty='dashed') +
+  xlab('Proportion of class 1') + ylab('error rate')
+f_ib
+```
+
+The second misspecification - imbalanced sampling shows that the error rate has symmetric behaviour.  This is because for a binary classifier, there is symmetry in predicting either class.  The horizontal axis is the proportion of class 1 in the training set.  The trough at about 0.5 suggests the performance is the best if the classes are balanced.  This agrees with the understanding that the underlying sample is generated from a balanced distribution of both classes.  When the sampling is more imbalanced, the error rate goes up (on both ends).  To extrapolate, when the LDA classifier is trained with all 1 or 0 class, it will always predict either class and the error rate will become 50%.
+
+**Misspecification (iii) - Class Flip in Training Set**  
+
+Suppose by random error the recorded classes in the training set were flipped.  Some 1% to 100% of flipping are tested. 
+
+```{r mean_flip, cache=T}
+# Misspecification (iii) CLass flip
+mean_flip <- data.frame(matrix(ncol=2, nrow=0))
+
+for (m in seq(1,100)) { # 100 parameters, each represents an increment of 1%
+  error <- c()
+  
+  # iteration for 1 parameter
+  for (i in seq(iter_size)) { 
+    
+    Z <- matrix(rnorm(2*n), ncol = 2) # two-variate Gaussian
+    y <- rep(c(1, 0), times = c(n_true, n_false)) # class balance
+    X1 <- 3*Z[,1] + 2*Z[,2] + 6*y # predictors shares common Sigma
+    X2 <- Z[,1] - 4*Z[,2] + 4*y   # but mean vectors depends on y
+    dat = data.frame(X1 = X1, X2 = X2, class = as.factor(y))
+    
+    # stratified train test split
+    dat <- dat %>% mutate(id=row_number())
+    train <- dat %>% group_by(class) %>% sample_frac(0.7)
+    test <- anti_join(dat, train, by='id')
+
+    # mis (iii) poisoning class flip from 1% to 60% on training set
+    flip <- sample_frac(train, 0.01*m)
+    flip_class <- 2-as.numeric(train[train$id %in% flip$id,]$class)
+    train[train$id %in% flip$id,]$class <- as.factor(flip_class)
+    
+    # LDA
+    l <- lda(class ~ X1 + X2, data=train)
+    pred.class <- predict(l, newdata=test[,1:2])$class
+    true.class <- test$class
+    t <- table(pred.class, true.class)
+    error <- append(error, 1-sum( diag(t) ) / sum(t) )
+  }
+  
+  mean_flip <- rbind(mean_flip, c(0.01*m, mean(error)))
+}
+
+nm <- c('flip_prop','error_rate')
+colnames(mean_flip) <- nm
+f_cf <- ggplot(data=mean_flip, mapping=aes(x=flip_prop, y=error_rate)) + 
+  geom_point() + 
+  geom_abline(intercept=mean_base, slope=0, lty='dashed') + 
+  geom_abline(intercept=1-mean_base, slope=0, lty='dashed') +
+  xlab('Proportion of class flip') + ylab('error rate')
+f_cf
+```
+
+The third misspecification - class flip in training set shows that the error rate goes up at high proportion of flipped class in the training set.  In small proportion of flipping say $\le 10%$, the error rate is close to the baseline because the baseline error already 'included' 12.3% flipping in its prediction.  When the training data is randomly poisoned, LDA (and arguably other classifiers) is misled and makes incorrect predictions.  The 87.7% limit (upper dashed line) reflects LDA by random has 12.3% base error which turns into 'correctness' (error on false prediction becomes correct) in the limit of all classes are flipped.
+
+
+**Conclusion**  
+The LDA is based on the assumption that the underlying distribution is a multivariate Gaussian which the covariate  matrix is common in each class.  From 2 000 samples, the error of the baseline case which meets the assumptions is about 12.3%. In the analysis above, misspecification (i) deviates from the Gaussian assumption and the error rises with a heavy tail.  Misspecification (ii) suggests training set deviates from the underlying balanced Gaussian and the error rates goes up with more imbalance.  Misspecification (iii) adds random error to the training set by flipping the classes, the more classes mixed up the higher the error.  The errors in the three scenarios converge to the baseline error when the respective misspecification vanishes.
